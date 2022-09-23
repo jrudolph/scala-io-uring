@@ -72,9 +72,13 @@ return sring;
 
   val IORING_OP_READV = 1: Byte
   val IORING_OP_READ = 22: Byte
+  val IORING_OP_PROVIDE_BUFFERS = 31: Byte
 
   val IOSQE_IO_DRAIN = 2: Byte
   val IOSQE_IO_LINK = 4: Byte
+  val IOSQE_BUFFER_SELECT = 32: Byte
+
+  val IORING_CQE_BUFFER_SHIFT = 16
 
   val myFile = new RandomAccessFile("build.sbt", "r")
   val fd = fdOf(myFile)
@@ -98,13 +102,40 @@ write_barrier();
   sealed abstract class Op(val opId: Byte) {
     def prepareSQE(buffer: ByteBuffer): Unit
   }
+  case class ProvideBuffersOp(
+      flags:         Byte,
+      numBuffers:    Int,
+      sizePerBuffer: Int,
+      addr:          Long,
+      bufferGroup:   Short,
+      userData:      Long
+  ) extends Op(IORING_OP_PROVIDE_BUFFERS) {
+    override def prepareSQE(buffer: ByteBuffer): Unit = {
+      buffer.put(0, opId)
+      buffer.put(1, flags)
+      buffer.putShort(2, 0 /* ioprio */ )
+      buffer.putInt(4, numBuffers)
+      buffer.putLong(8, 0)
+      buffer.putLong(16, addr)
+      buffer.putInt(24, sizePerBuffer)
+      buffer.putInt(28, 0)
+      buffer.putLong(32, userData)
+      buffer.putShort(40, bufferGroup)
+      buffer.putShort(42, 0)
+      buffer.putInt(44, 0)
+      buffer.putLong(48, 0)
+      buffer.putLong(56, 0)
+    }
+  }
+
   case class ReadOp(
       flags:             Byte,
       fd:                Int,
       destinationOffset: Long,
       targetBufferAddr:  Long,
       targetBufferSize:  Int,
-      userData:          Long
+      userData:          Long,
+      bufferGroup:       Short = 0
   ) extends Op(IORING_OP_READ) {
     override def prepareSQE(buffer: ByteBuffer): Unit = {
       buffer.put(0, opId)
@@ -116,7 +147,9 @@ write_barrier();
       buffer.putInt(24, targetBufferSize)
       buffer.putInt(28, 0)
       buffer.putLong(32, userData)
-      buffer.putLong(40, 0)
+      buffer.putShort(40, bufferGroup)
+      buffer.putShort(42, 0)
+      buffer.putInt(44, 0)
       buffer.putLong(48, 0)
       buffer.putLong(56, 0)
     }
@@ -148,14 +181,20 @@ write_barrier();
   sqe.len = 1
   sqe.user_data = 0xdeadbeef
   sqe.write()*/
-  val resAddr = Native.malloc(100)
-  val resPointer = new Pointer(resAddr)
-  val read = ReadOp(0, fd, 0, resAddr, 100, 0xdeadbeef)
+  val numBuffers = 10
+  val perBuffer = 100
+  val buffers = Native.malloc(numBuffers * perBuffer)
+  val buffersPointer = new Pointer(buffers)
+  submit(ProvideBuffersOp(0, numBuffers, perBuffer, buffers, 0x1234, 0xbbbbdddd))
+
+  //val resAddr = Native.malloc(100)
+  //val resPointer = new Pointer(resAddr)
+  val read = ReadOp(IOSQE_BUFFER_SELECT, fd, 0, 0, 100, 0xdeadbeef, 0x1234)
   submit(read)
 
-  val resAddr2 = Native.malloc(50)
-  val resPointer2 = new Pointer(resAddr2)
-  val read2 = ReadOp(0, fd, 100, resAddr2, 50, 0xcafebabe)
+  //val resAddr2 = Native.malloc(50)
+  //val resPointer2 = new Pointer(resAddr2)
+  val read2 = ReadOp(IOSQE_BUFFER_SELECT, fd, 100, 0, 50, 0xcafebabe, 0x1234)
   submit(read2)
 
   val sqe2 = new IoUringSqe.ByReference(sqePointer.share(64 * 0)) // sqe = &sqring→sqes[index]
@@ -173,18 +212,30 @@ write_barrier();
   // check cqes before call
   println(s"cqes head: ${cqRingPointer.getInt(params.cq_off.head)} tail: ${cqRingPointer.getInt(params.cq_off.tail)}")
 
-  val res = libC.syscall(LibC.SYSCALL_IO_URING_ENTER, uringFd, 2, 0, 1, 0, 0)
+  val res = libC.syscall(LibC.SYSCALL_IO_URING_ENTER, uringFd, 3, 0, 1, 0, 0)
   println(s"enter result: $res")
   println(s"after enter sq tail: ${sqRingPointer.getInt(params.sq_off.tail)} sq head: ${sqRingPointer.getInt(params.sq_off.head)}")
 
   val cqeP = new IoUringCqe(cqRingPointer.share(params.cq_off.cqes))
   val cqes = cqeP.toArray(params.cq_entries).asInstanceOf[Array[IoUringCqe]]
   println(x)
-  println(s"head: ${cqRingPointer.getInt(params.cq_off.head)} tail: ${cqRingPointer.getInt(params.cq_off.tail)}")
+  println(s"cq head: ${cqRingPointer.getInt(params.cq_off.head)} tail: ${cqRingPointer.getInt(params.cq_off.tail)}")
   println(cqes(0))
   println(cqes(1))
-  println(new String(resPointer.getByteArray(0, cqes(0).res)))
-  println(new String(resPointer2.getByteArray(0, cqes(1).res)))
+  println(cqes(2))
+
+  {
+    val buf1 = cqes(1).flags >> IORING_CQE_BUFFER_SHIFT
+    println(buf1)
+    println(new String(buffersPointer.getByteArray(buf1 * perBuffer, cqes(1).res)))
+  }
+  {
+    val buf1 = cqes(2).flags >> IORING_CQE_BUFFER_SHIFT
+    println(buf1)
+    println(new String(buffersPointer.getByteArray(buf1 * perBuffer, cqes(2).res)))
+  }
+  //println(new String(resPointer.getByteArray(0, cqes(0).res)))
+  //println(new String(resPointer2.getByteArray(0, cqes(1).res)))
 
   //val readvres = libC.readv(fd, iovec, 1)
   //println(readvres)
