@@ -96,7 +96,7 @@ write_barrier();
   @volatile var x = 0
 
   sealed abstract class Op(val opId: Byte) {
-    def render(buffer: ByteBuffer): Unit
+    def prepareSQE(buffer: ByteBuffer): Unit
   }
   case class ReadOp(
       flags:             Byte,
@@ -106,7 +106,7 @@ write_barrier();
       targetBufferSize:  Int,
       userData:          Long
   ) extends Op(IORING_OP_READ) {
-    override def render(buffer: ByteBuffer): Unit = {
+    override def prepareSQE(buffer: ByteBuffer): Unit = {
       buffer.put(0, opId)
       buffer.put(1, flags)
       buffer.putShort(2, 0 /* ioprio */ )
@@ -125,10 +125,10 @@ write_barrier();
     // FIXME: check against overflow
     val curTail = sqRingPointer.getInt(params.sq_off.tail)
     val index = curTail & sqRingPointer.getInt(params.sq_off.ring_mask)
-    op.render(sqePointer.getByteBuffer(64 * index, 64))
-    sqRingPointer.setInt(params.sq_off.array + 4 * index, index)
+    op.prepareSQE(sqePointer.getByteBuffer(64 * index, 64))
+    sqRingPointer.setInt(params.sq_off.array + 4 * index, index) // should use unsafe.putIntVolatile
     x = 23 // write barrier (?)
-    sqRingPointer.setInt(params.sq_off.tail, curTail + 1)
+    sqRingPointer.setInt(params.sq_off.tail, curTail + 1) // should use unsafe.putIntVolatile for the correct barrier
     x = 42 // write barrier (?)
   }
 
@@ -150,12 +150,12 @@ write_barrier();
   sqe.write()*/
   val resAddr = Native.malloc(100)
   val resPointer = new Pointer(resAddr)
-  val read = ReadOp(IOSQE_IO_LINK, fd, -1, resAddr, 100, 0xdeadbeef)
+  val read = ReadOp(0, fd, 0, resAddr, 100, 0xdeadbeef)
   submit(read)
 
   val resAddr2 = Native.malloc(50)
   val resPointer2 = new Pointer(resAddr2)
-  val read2 = ReadOp(IOSQE_IO_DRAIN, fd, -1, resAddr2, 50, 0xcafebabe)
+  val read2 = ReadOp(0, fd, 100, resAddr2, 50, 0xcafebabe)
   submit(read2)
 
   val sqe2 = new IoUringSqe.ByReference(sqePointer.share(64 * 0)) // sqe = &sqring→sqes[index]
@@ -173,8 +173,9 @@ write_barrier();
   // check cqes before call
   println(s"cqes head: ${cqRingPointer.getInt(params.cq_off.head)} tail: ${cqRingPointer.getInt(params.cq_off.tail)}")
 
-  val res = libC.syscall(LibC.SYSCALL_IO_URING_ENTER, uringFd, 2, 2, 1, 0, 0)
+  val res = libC.syscall(LibC.SYSCALL_IO_URING_ENTER, uringFd, 2, 0, 1, 0, 0)
   println(s"enter result: $res")
+  println(s"after enter sq tail: ${sqRingPointer.getInt(params.sq_off.tail)} sq head: ${sqRingPointer.getInt(params.sq_off.head)}")
 
   val cqeP = new IoUringCqe(cqRingPointer.share(params.cq_off.cqes))
   val cqes = cqeP.toArray(params.cq_entries).asInstanceOf[Array[IoUringCqe]]
