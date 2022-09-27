@@ -1,29 +1,53 @@
 package net.virtualvoid.io.uring
 
-import com.sun.jna.Structure.FieldOrder
-import com.sun.jna.{ Native, Pointer, Structure }
-import sun.misc.Unsafe
+import com.sun.jna.{ Native, Pointer }
 
 import java.io.{ FileDescriptor, RandomAccessFile }
-import java.lang.invoke.MethodHandles
-import java.nio.{ ByteBuffer, ByteOrder, DirectByteBuffer }
+import java.net.{ InetSocketAddress, ServerSocket, SocketAddress, SocketImpl }
+import java.nio.ByteBuffer
+import java.nio.channels.ServerSocketChannel
+import java.util
 
 object IOUringMain extends App {
   val fdOf: RandomAccessFile => Int = {
-    val fdField = classOf[RandomAccessFile].getDeclaredField("fd")
+    /*val fdField = classOf[RandomAccessFile].getDeclaredField("fd")
     fdField.setAccessible(true)
     val fdFdField = classOf[FileDescriptor].getDeclaredField("fd")
-    fdFdField.setAccessible(true)
+    fdFdField.setAccessible(true)*/
 
     { raf =>
-      val fd = fdField.get(raf)
-      fdFdField.get(fd).asInstanceOf[Int]
+      val fd = raf.getFD
+      //fdFdField.get(fd).asInstanceOf[Int]
+      sun.nio.ch.IOUtil.fdVal(fd)
+    }
+  }
+  val fdOfServerSocket: ServerSocket => Int = {
+    val implField = classOf[ServerSocket].getDeclaredField("impl")
+    implField.setAccessible(true)
+    val fdField = classOf[SocketImpl].getDeclaredField("fd")
+    fdField.setAccessible(true)
+
+    { socket =>
+      val impl = implField.get(socket)
+      val fd = fdField.get(impl).asInstanceOf[FileDescriptor]
+      require(fd ne null)
+      sun.nio.ch.IOUtil.fdVal(fd)
+    }
+  }
+  val fdOfServerSocketChannel: ServerSocketChannel => Int = {
+    val fdField = Class.forName("sun.nio.ch.ServerSocketChannelImpl").getDeclaredField("fd")
+    fdField.setAccessible(true)
+
+    { ch =>
+      val fd = fdField.get(ch).asInstanceOf[FileDescriptor]
+      require(fd ne null)
+      sun.nio.ch.IOUtil.fdVal(fd)
     }
   }
 
   val libC = Native.load("c", classOf[LibC])
   val params = new IoUringParams
-  val uringFd = libC.syscall(LibC.SYSCALL_IO_URING_SETUP, 32, params)
+  val uringFd = libC.syscall(LibC.SYSCALL_IO_URING_SETUP, 1024, params)
   println(params)
 
   /*
@@ -70,15 +94,22 @@ return sring;
    */
   //println(sqHeadPointer.getInt(0), sqTailPointer.getInt(0))
 
+  val IORING_OP_NOP = 0: Byte
   val IORING_OP_READV = 1: Byte
+  val IORING_OP_ACCEPT = 13: Byte
   val IORING_OP_READ = 22: Byte
+  val IORING_OP_WRITE = 23: Byte
   val IORING_OP_PROVIDE_BUFFERS = 31: Byte
 
   val IOSQE_IO_DRAIN = 2: Byte
   val IOSQE_IO_LINK = 4: Byte
   val IOSQE_BUFFER_SELECT = 32: Byte
 
+  val IORING_ENTER_GETEVENTS = 1
+
   val IORING_CQE_BUFFER_SHIFT = 16
+
+  val IORING_CQE_F_BUFFER = 1
 
   val myFile = new RandomAccessFile("build.sbt", "r")
   val fd = fdOf(myFile)
@@ -101,6 +132,28 @@ write_barrier();
 
   sealed abstract class Op(val opId: Byte) {
     def prepareSQE(buffer: ByteBuffer): Unit
+    def userData: Long
+    def withUserData(newUserData: Long): Op
+  }
+  case class NopOp(
+      flags:    Byte,
+      userData: Long
+  ) extends Op(IORING_OP_NOP) {
+    override def prepareSQE(buffer: ByteBuffer): Unit = {
+      buffer.put(opId)
+      buffer.put(flags)
+      buffer.putShort(0 /* ioprio */ )
+      buffer.putInt(0)
+      buffer.putLong(0)
+      buffer.putLong(0)
+      buffer.putLong(0)
+      buffer.putLong(userData)
+      buffer.putLong(0)
+      buffer.putLong(0)
+      buffer.putLong(0)
+    }
+
+    override def withUserData(newUserData: Long): NopOp = copy(userData = newUserData)
   }
   case class ProvideBuffersOp(
       flags:         Byte,
@@ -111,21 +164,46 @@ write_barrier();
       userData:      Long
   ) extends Op(IORING_OP_PROVIDE_BUFFERS) {
     override def prepareSQE(buffer: ByteBuffer): Unit = {
-      buffer.put(0, opId)
-      buffer.put(1, flags)
-      buffer.putShort(2, 0 /* ioprio */ )
-      buffer.putInt(4, numBuffers)
-      buffer.putLong(8, 0)
-      buffer.putLong(16, addr)
-      buffer.putInt(24, sizePerBuffer)
-      buffer.putInt(28, 0)
-      buffer.putLong(32, userData)
-      buffer.putShort(40, bufferGroup)
-      buffer.putShort(42, 0)
-      buffer.putInt(44, 0)
-      buffer.putLong(48, 0)
-      buffer.putLong(56, 0)
+      buffer.put(opId)
+      buffer.put(flags)
+      buffer.putShort(0 /* ioprio */ )
+      buffer.putInt(numBuffers)
+      buffer.putLong(0)
+      buffer.putLong(addr)
+      buffer.putInt(sizePerBuffer)
+      buffer.putInt(0)
+      buffer.putLong(userData)
+      buffer.putShort(bufferGroup)
+      buffer.putShort(0)
+      buffer.putInt(0)
+      buffer.putLong(0)
+      buffer.putLong(0)
     }
+
+    override def withUserData(newUserData: Long): ProvideBuffersOp = copy(userData = newUserData)
+  }
+
+  case class AcceptOp(
+      flags:    Byte,
+      socketFd: Int,
+      sockAddr: Long,
+      addrLen:  Long,
+      userData: Long) extends Op(IORING_OP_ACCEPT) {
+    override def prepareSQE(buffer: ByteBuffer): Unit = {
+      buffer.put(opId)
+      buffer.put(flags)
+      buffer.putShort(0 /* ioprio */ )
+      buffer.putInt(socketFd)
+      buffer.putLong(addrLen)
+      buffer.putLong(sockAddr)
+      buffer.putInt(0)
+      buffer.putInt(0)
+      buffer.putLong(userData)
+      buffer.putLong(0)
+      buffer.putLong(0)
+      buffer.putLong(0)
+    }
+    override def withUserData(newUserData: Long): AcceptOp = copy(userData = newUserData)
   }
 
   case class ReadOp(
@@ -135,30 +213,61 @@ write_barrier();
       targetBufferAddr:  Long,
       targetBufferSize:  Int,
       userData:          Long,
-      bufferGroup:       Short = 0
+      bufferGroup:       Short = 0 // FIXME: buffer selection should be abstracted
   ) extends Op(IORING_OP_READ) {
     override def prepareSQE(buffer: ByteBuffer): Unit = {
-      buffer.put(0, opId)
-      buffer.put(1, flags)
-      buffer.putShort(2, 0 /* ioprio */ )
-      buffer.putInt(4, fd)
-      buffer.putLong(8, destinationOffset)
-      buffer.putLong(16, targetBufferAddr)
-      buffer.putInt(24, targetBufferSize)
-      buffer.putInt(28, 0)
-      buffer.putLong(32, userData)
-      buffer.putShort(40, bufferGroup)
-      buffer.putShort(42, 0)
-      buffer.putInt(44, 0)
-      buffer.putLong(48, 0)
-      buffer.putLong(56, 0)
+      buffer.put(opId)
+      buffer.put(flags)
+      buffer.putShort(0 /* ioprio */ )
+      buffer.putInt(fd)
+      buffer.putLong(destinationOffset)
+      buffer.putLong(targetBufferAddr)
+      buffer.putInt(targetBufferSize)
+      buffer.putInt(0)
+      buffer.putLong(userData)
+      buffer.putShort(bufferGroup)
+      buffer.putShort(0)
+      buffer.putInt(0)
+      buffer.putLong(0)
+      buffer.putLong(0)
     }
+    override def withUserData(newUserData: Long): ReadOp = copy(userData = newUserData)
   }
-  def submit(op: Op): Unit = {
+  case class WriteOp(
+      flags:             Byte,
+      fd:                Int,
+      destinationOffset: Long,
+      srcBufferAddr:     Long,
+      srcBufferSize:     Int,
+      userData:          Long
+  ) extends Op(IORING_OP_WRITE) {
+    override def prepareSQE(buffer: ByteBuffer): Unit = {
+      buffer.put(opId)
+      buffer.put(flags)
+      buffer.putShort(0 /* ioprio */ )
+      buffer.putInt(fd)
+      buffer.putLong(destinationOffset)
+      buffer.putLong(srcBufferAddr)
+      buffer.putInt(srcBufferSize)
+      buffer.putInt(0)
+      buffer.putLong(userData)
+      buffer.putInt(0)
+      buffer.putInt(0)
+      buffer.putLong(0)
+      buffer.putLong(0)
+    }
+    override def withUserData(newUserData: Long): WriteOp = copy(userData = newUserData)
+  }
+  val sqes = sqePointer.getByteBuffer(0, 64 * params.sq_entries)
+  def submitGlobal(op: Op): Unit = {
+    require(op.userData != 0L)
     // FIXME: check against overflow
     val curTail = sqRingPointer.getInt(params.sq_off.tail)
     val index = curTail & sqRingPointer.getInt(params.sq_off.ring_mask)
-    op.prepareSQE(sqePointer.getByteBuffer(64 * index, 64))
+    //op.prepareSQE(sqePointer.getByteBuffer(64 * index, 64))
+    sqes.clear()
+    sqes.position(64 * index)
+    op.prepareSQE(sqes)
     sqRingPointer.setInt(params.sq_off.array + 4 * index, index) // should use unsafe.putIntVolatile
     x = 23 // write barrier (?)
     sqRingPointer.setInt(params.sq_off.tail, curTail + 1) // should use unsafe.putIntVolatile for the correct barrier
@@ -181,24 +290,25 @@ write_barrier();
   sqe.len = 1
   sqe.user_data = 0xdeadbeef
   sqe.write()*/
-  val numBuffers = 10
-  val perBuffer = 100
+  val specialTag = -1L
+  val numBuffers = 10000
+  val perBuffer = 10000
   val buffers = Native.malloc(numBuffers * perBuffer)
   val buffersPointer = new Pointer(buffers)
-  submit(ProvideBuffersOp(0, numBuffers, perBuffer, buffers, 0x1234, 0xbbbbdddd))
+  submitGlobal(ProvideBuffersOp(0, numBuffers, perBuffer, buffers, 0x1234, specialTag))
 
   //val resAddr = Native.malloc(100)
   //val resPointer = new Pointer(resAddr)
-  val read = ReadOp(IOSQE_BUFFER_SELECT, fd, 0, 0, 100, 0xdeadbeef, 0x1234)
-  submit(read)
+  /*val read = ReadOp(IOSQE_BUFFER_SELECT, fd, 0, 0, 100, 0xdeadbeef, 0x1234)
+  submit(read)*/
 
   //val resAddr2 = Native.malloc(50)
   //val resPointer2 = new Pointer(resAddr2)
-  val read2 = ReadOp(IOSQE_BUFFER_SELECT, fd, 100, 0, 50, 0xcafebabe, 0x1234)
+  /*val read2 = ReadOp(IOSQE_BUFFER_SELECT, fd, 100, 0, 50, 0xcafebabe, 0x1234)
   submit(read2)
 
   val sqe2 = new IoUringSqe.ByReference(sqePointer.share(64 * 0)) // sqe = &sqring→sqes[index]
-  println(s"sqe2: $sqe2")
+  println(s"sqe2: $sqe2")*/
 
   //sqRingPointer.setInt(params.sq_off.array + 4 * index, sqeIndex) // sqring→array[index] = index;
   // write_barrier()
@@ -207,33 +317,51 @@ write_barrier();
   //x = 14 // emulate write_barrier?
   // write_barrier()
 
-  val IORING_ENTER_GETEVENTS = 1
+  val ssc = ServerSocketChannel.open()
+  ssc.bind(new InetSocketAddress(8081))
+  ssc.configureBlocking(true)
+  //val s = ssc.socket()
+  //println(s"block: ${s.getChannel.isBlocking}")
+  val sfd = fdOfServerSocketChannel(ssc)
+  println(s"socket fd $sfd")
+  //submitGlobal(AcceptOp(0, sfd, 0, 0, 0xcafebabe))
+  //submitGlobal(AcceptOp(0, sfd, 0, 0, 0xcafebab1))
 
-  // check cqes before call
-  println(s"cqes head: ${cqRingPointer.getInt(params.cq_off.head)} tail: ${cqRingPointer.getInt(params.cq_off.tail)}")
+  //val IORING_ENTER_GETEVENTS = 1
 
-  val res = libC.syscall(LibC.SYSCALL_IO_URING_ENTER, uringFd, 3, 0, 1, 0, 0)
-  println(s"enter result: $res")
-  println(s"after enter sq tail: ${sqRingPointer.getInt(params.sq_off.tail)} sq head: ${sqRingPointer.getInt(params.sq_off.head)}")
+  //val res = libC.syscall(LibC.SYSCALL_IO_URING_ENTER, uringFd, 2, 0, 0, 0)
 
-  val cqeP = new IoUringCqe(cqRingPointer.share(params.cq_off.cqes))
-  val cqes = cqeP.toArray(params.cq_entries).asInstanceOf[Array[IoUringCqe]]
-  println(x)
-  println(s"cq head: ${cqRingPointer.getInt(params.cq_off.head)} tail: ${cqRingPointer.getInt(params.cq_off.tail)}")
-  println(cqes(0))
-  println(cqes(1))
-  println(cqes(2))
+  /*while (true) {
+    // check cqes before call
+    println(s"cqes head: ${cqRingPointer.getInt(params.cq_off.head)} tail: ${cqRingPointer.getInt(params.cq_off.tail)}")
 
-  {
-    val buf1 = cqes(1).flags >> IORING_CQE_BUFFER_SHIFT
-    println(buf1)
-    println(new String(buffersPointer.getByteArray(buf1 * perBuffer, cqes(1).res)))
+    val res = libC.syscall(LibC.SYSCALL_IO_URING_ENTER, uringFd, 0, 1, IORING_ENTER_GETEVENTS, 0)
+    println(s"enter result: $res")
+    println(s"after enter sq tail: ${sqRingPointer.getInt(params.sq_off.tail)} sq head: ${sqRingPointer.getInt(params.sq_off.head)}")
+
+    sqRingPointer.setInt(params.cq_off.head, sqRingPointer.getInt(params.cq_off.head) + 1)
+
+    val cqeP = new IoUringCqe(cqRingPointer.share(params.cq_off.cqes))
+    val cqes = cqeP.toArray(params.cq_entries).asInstanceOf[Array[IoUringCqe]]
+    println(x)
+    println(s"cq head: ${cqRingPointer.getInt(params.cq_off.head)} tail: ${cqRingPointer.getInt(params.cq_off.tail)}")
+    println(cqes(0))
+    println(cqes(1))
+    println(cqes(2))
+  }*/
+
+  /*{
+    val cqId = 1
+    val bufId = cqes(cqId).flags >> IORING_CQE_BUFFER_SHIFT
+    println(bufId)
+    println(new String(buffersPointer.getByteArray(bufId * perBuffer, cqes(cqId).res)))
   }
   {
-    val buf1 = cqes(2).flags >> IORING_CQE_BUFFER_SHIFT
-    println(buf1)
-    println(new String(buffersPointer.getByteArray(buf1 * perBuffer, cqes(2).res)))
-  }
+    val cqId = 2
+    val bufId = cqes(cqId).flags >> IORING_CQE_BUFFER_SHIFT
+    println(bufId)
+    println(new String(buffersPointer.getByteArray(bufId * perBuffer, cqes(cqId).res)))
+  }*/
   //println(new String(resPointer.getByteArray(0, cqes(0).res)))
   //println(new String(resPointer2.getByteArray(0, cqes(1).res)))
 
@@ -241,4 +369,147 @@ write_barrier();
   //println(readvres)
   //println(resPointer.getByteArray(0, 100).toSeq)
 
+  //def debug(str: String): Unit = println(str)
+  def debug(str: => String): Unit = {}
+
+  val EmptyByteBuffer = ByteBuffer.allocate(0)
+  val TheWriteBuffer = Native.malloc(1000)
+  val TheWriteBufferP = new Pointer(TheWriteBuffer)
+  val TheWriteBufferByteBuffer = TheWriteBufferP.getByteBuffer(0, 1000)
+
+  val buffersByteBuffer = buffersPointer.getByteBuffer(0, numBuffers * perBuffer)
+
+  trait IOContext {
+    def spawn(f: => Unit): Unit
+    def accept(fd: Int)(handleSocket: Int => Unit): Unit
+    def read(fd: Int, offset: Long, length: Int)(handleRead: ByteBuffer => Unit): Unit
+    def write(fd: Int, offset: Long, buffer: ByteBuffer)(handleWrite: Int => Unit): Unit
+
+    def handle(userData: Long, res: Int, flags: Int): Unit
+  }
+  val uringIoContext = new IOContext {
+    val outstandingEntries = new util.Hashtable[Long, (Int, Int) => Unit](256)
+    private var nextId = 1L
+    private var remainingBuffers = numBuffers
+    val theBufferGroup = 0x1234: Short
+    def resultBuffer(res: Int, flags: Int): ByteBuffer = {
+      val bufId = flags >> IORING_CQE_BUFFER_SHIFT
+      //require(bufId == remainingBuffers - 1, s"Didn't get last buffer, bufId: $bufId, expected: ${remainingBuffers - 1}")
+      //remainingBuffers -= 1
+      //println(s"rem: $remainingBuffers")
+      //buffersPointer.getByteBuffer(bufId * perBuffer, res)
+      val off = bufId * perBuffer
+      buffersByteBuffer.clear().position(off).limit(off + res)
+      buffersByteBuffer
+    }
+
+    private def submit(op: Op)(completion: (Int, Int) => Unit): Unit = {
+      val id = nextId
+      nextId += 1
+      debug(s"Registering $id for op ${op.getClass}")
+      outstandingEntries.put(id, completion)
+      submitGlobal(op.withUserData(id))
+    }
+    //def handle(cqe: IoUringCqe): Unit = handle(cqe.user_data, cqe.res, cqe.flags)
+    def handle(userData: Long, res: Int, flags: Int): Unit = if (userData != specialTag) {
+      import scala.collection.JavaConverters._
+      if (!outstandingEntries.containsKey(userData)) println(s"Missing handler for userData: $userData existing: ${outstandingEntries.keys().asScala.toVector}")
+      else {
+        val handler = outstandingEntries.remove(userData)
+        debug(s"Looking for ${userData} found: $handler")
+        handler(res, flags)
+      }
+    }
+
+    override def spawn(f: => Unit): Unit =
+      submit(NopOp(0, 0))((_, _) => f)
+
+    override def accept(fd: Int)(handleSocket: Int => Unit): Unit =
+      submit(AcceptOp(0, sfd, 0, 0, 0))((res, _) => handleSocket(res))
+
+    override def read(fd: Int, offset: Long, length: Int)(handleRead: ByteBuffer => Unit): Unit =
+      submit(ReadOp(IOSQE_BUFFER_SELECT, fd, offset, 0, length, 0, theBufferGroup)) { (res, flags) =>
+        if ((flags & IORING_CQE_F_BUFFER) != 0) remainingBuffers -= 1
+        require(res >= 0, s"Result was negative: ${res}")
+        if (res == 0) handleRead(EmptyByteBuffer)
+        else handleRead(resultBuffer(res, flags))
+
+        if (remainingBuffers < numBuffers / 2) { // FIXME
+          remainingBuffers = numBuffers
+          submitGlobal(ProvideBuffersOp(0, numBuffers, perBuffer, buffers, 0x1234, specialTag))
+        }
+      }
+
+    override def write(fd: Int, offset: Long, buffer: ByteBuffer)(handleWrite: Int => Unit): Unit = {
+      val len = buffer.remaining()
+      TheWriteBufferByteBuffer.clear()
+      TheWriteBufferByteBuffer.put(buffer)
+      submit(WriteOp(0, fd, offset, TheWriteBuffer, len, 0)) { (res, flags) =>
+        require(res == len)
+        handleWrite(res)
+      }
+    }
+  }
+
+  def sqHead() = sqRingPointer.getInt(params.sq_off.head)
+  def sqTail() = sqRingPointer.getInt(params.sq_off.tail)
+
+  def cqHead() = cqRingPointer.getInt(params.cq_off.head)
+  def cqTail() = cqRingPointer.getInt(params.cq_off.tail)
+  val cqMask = cqRingPointer.getInt(params.cq_off.ring_mask)
+
+  def loop(): Unit = while (true) {
+    // call uring enter to submit / collect completions
+    // run completions one by one
+    // on IO: add submission entry (and enter?)
+    val toSubmit = sqTail() - sqHead()
+    debug(s"sqHead: ${sqHead()} sqTail: ${sqTail()} toSubmit: $toSubmit")
+    //val res = LibC2.syscall(LibC.SYSCALL_IO_URING_ENTER, uringFd, toSubmit, 1, IORING_ENTER_GETEVENTS, 0)
+    val res = libC.syscall(LibC.SYSCALL_IO_URING_ENTER, uringFd, toSubmit, 1, IORING_ENTER_GETEVENTS, 0)
+    //require(toSubmit == res)
+
+    //x += 1
+
+    var cqIdx = cqHead()
+    val last = cqTail()
+
+    debug(s"cqHead: $cqIdx cqTail: $last")
+    while (cqIdx < last) {
+      debug(s"At $cqIdx")
+      val idx = cqIdx & cqMask
+      //val cqeP = new IoUringCqe(cqRingPointer.share(params.cq_off.cqes))
+      //val cqes = cqeP.toArray(params.cq_entries).asInstanceOf[Array[IoUringCqe]]
+      //val cqe = new IoUringCqe(cqRingPointer.share(params.cq_off.cqes + idx * 16))
+      //debug(cqe.toString)
+      val off = params.cq_off.cqes + idx * 16
+      uringIoContext.handle(cqRingPointer.getLong(off), cqRingPointer.getInt(off + 8), cqRingPointer.getInt(off + 12))
+      cqIdx += 1
+    }
+    cqRingPointer.setInt(params.cq_off.head, last)
+  }
+
+  val theResponse = "HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: keep-alive\r\nContent-Type: text/plain\r\n\r\nHello World!".getBytes
+  webserver(sfd, uringIoContext)
+  loop()
+
+  def webserver(socketFd: Int, ctx: IOContext): Unit =
+    ctx.accept(socketFd) { socketFd =>
+      debug(s"Got socket: $socketFd")
+      ctx.spawn {
+        def handleReq(existing: String = null): Unit =
+          ctx.read(socketFd, 0, 10000) { buf =>
+            val b = new Array[Byte](buf.remaining())
+            buf.get(b)
+            val str = new String(b)
+            val req = if (existing eq null) str else existing + str // FIXME: split unicode
+            if (req.endsWith("\r\n\r\n")) {
+              debug(s"Got request: '$req'")
+              ctx.write(socketFd, 0, ByteBuffer.wrap(theResponse))(_ => ())
+              handleReq(null)
+            } else handleReq(req)
+          }
+        handleReq()
+      }
+      webserver(socketFd, ctx)
+    }
 }
