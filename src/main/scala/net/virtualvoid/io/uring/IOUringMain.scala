@@ -79,6 +79,8 @@ return sring;
 
   println(sqRingPointer.getInt(params.sq_off.head), sqRingPointer.getInt(params.sq_off.tail), sqRingPointer.getInt(params.sq_off.ring_mask), sqRingPointer.getInt(params.sq_off.ring_entries), sqRingPointer.getInt(params.sq_off.flags))
 
+  val sqRingPointerByteBuffer = sqRingPointer.getByteBuffer(0, length)
+  val cqRingPointerByteBuffer = cqRingPointer.getByteBuffer(0, params.cq_off.cqes + params.cq_entries * 16)
   /*
   sqe→opcode = IORING_OP_READV;
  sqe→fd = fd;
@@ -262,15 +264,17 @@ write_barrier();
   def submitGlobal(op: Op): Unit = {
     require(op.userData != 0L)
     // FIXME: check against overflow
-    val curTail = sqRingPointer.getInt(params.sq_off.tail)
-    val index = curTail & sqRingPointer.getInt(params.sq_off.ring_mask)
+    val curTail = sqTail()
+    val index = curTail & sqMask
     //op.prepareSQE(sqePointer.getByteBuffer(64 * index, 64))
     sqes.clear()
     sqes.position(64 * index)
     op.prepareSQE(sqes)
-    sqRingPointer.setInt(params.sq_off.array + 4 * index, index) // should use unsafe.putIntVolatile
+    sqRingPointerByteBuffer.putInt(params.sq_off.array + 4 * index, index)
+    //sqRingPointer.setInt(params.sq_off.array + 4 * index, index) // should use unsafe.putIntVolatile
     x = 23 // write barrier (?)
-    sqRingPointer.setInt(params.sq_off.tail, curTail + 1) // should use unsafe.putIntVolatile for the correct barrier
+    //sqRingPointer.setInt(params.sq_off.tail, curTail + 1) // should use unsafe.putIntVolatile for the correct barrier
+    sqRingPointerByteBuffer.putInt(params.sq_off.tail, curTail + 1)
     x = 42 // write barrier (?)
   }
 
@@ -451,12 +455,13 @@ write_barrier();
     }
   }
 
-  def sqHead() = sqRingPointer.getInt(params.sq_off.head)
-  def sqTail() = sqRingPointer.getInt(params.sq_off.tail)
+  def sqHead() = sqRingPointerByteBuffer.getInt(params.sq_off.head)
+  def sqTail() = sqRingPointerByteBuffer.getInt(params.sq_off.tail)
+  lazy val sqMask = sqRingPointerByteBuffer.getInt(params.sq_off.ring_mask)
 
-  def cqHead() = cqRingPointer.getInt(params.cq_off.head)
-  def cqTail() = cqRingPointer.getInt(params.cq_off.tail)
-  val cqMask = cqRingPointer.getInt(params.cq_off.ring_mask)
+  def cqHead() = cqRingPointerByteBuffer.getInt(params.cq_off.head)
+  def cqTail() = cqRingPointerByteBuffer.getInt(params.cq_off.tail)
+  val cqMask = cqRingPointerByteBuffer.getInt(params.cq_off.ring_mask)
 
   def loop(): Unit = while (true) {
     // call uring enter to submit / collect completions
@@ -482,10 +487,10 @@ write_barrier();
       //val cqe = new IoUringCqe(cqRingPointer.share(params.cq_off.cqes + idx * 16))
       //debug(cqe.toString)
       val off = params.cq_off.cqes + idx * 16
-      uringIoContext.handle(cqRingPointer.getLong(off), cqRingPointer.getInt(off + 8), cqRingPointer.getInt(off + 12))
+      uringIoContext.handle(cqRingPointerByteBuffer.getLong(off), cqRingPointerByteBuffer.getInt(off + 8), cqRingPointerByteBuffer.getInt(off + 12))
       cqIdx += 1
     }
-    cqRingPointer.setInt(params.cq_off.head, last)
+    cqRingPointerByteBuffer.putInt(params.cq_off.head, last)
   }
 
   val theResponse = "HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: keep-alive\r\nContent-Type: text/plain\r\n\r\nHello World!".getBytes
