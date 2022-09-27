@@ -392,7 +392,7 @@ write_barrier();
     def handle(userData: Long, res: Int, flags: Int): Unit
   }
   val uringIoContext = new IOContext {
-    val outstandingEntries = new util.Hashtable[Long, (Int, Int) => Unit](256)
+    val outstandingEntries = new scala.collection.mutable.LongMap[(Int, Int) => Unit](1024)
     private var nextId = 1L
     private var remainingBuffers = numBuffers
     val theBufferGroup = 0x1234: Short
@@ -417,9 +417,9 @@ write_barrier();
     //def handle(cqe: IoUringCqe): Unit = handle(cqe.user_data, cqe.res, cqe.flags)
     def handle(userData: Long, res: Int, flags: Int): Unit = if (userData != specialTag) {
       import scala.collection.JavaConverters._
-      if (!outstandingEntries.containsKey(userData)) println(s"Missing handler for userData: $userData existing: ${outstandingEntries.keys().asScala.toVector}")
+      if (!outstandingEntries.contains(userData)) println(s"Missing handler for userData: $userData existing: ${outstandingEntries.keys}")
       else {
-        val handler = outstandingEntries.remove(userData)
+        val handler = outstandingEntries.remove(userData).get
         debug(s"Looking for ${userData} found: $handler")
         handler(res, flags)
       }
