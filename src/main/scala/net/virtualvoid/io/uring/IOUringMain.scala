@@ -277,6 +277,23 @@ write_barrier();
     sqRingPointerByteBuffer.putInt(params.sq_off.tail, curTail + 1)
     x = 42 // write barrier (?)
   }
+  def submitGlobalWithUserData(op: Op, userData: Long): Unit = {
+    //require(op.userData != 0L)
+    // FIXME: check against overflow
+    val curTail = sqTail()
+    val index = curTail & sqMask
+    //op.prepareSQE(sqePointer.getByteBuffer(64 * index, 64))
+    sqes.clear()
+    sqes.position(64 * index)
+    op.prepareSQE(sqes)
+    sqes.putLong(64 * index + 32, userData)
+    sqRingPointerByteBuffer.putInt(params.sq_off.array + 4 * index, index)
+    //sqRingPointer.setInt(params.sq_off.array + 4 * index, index) // should use unsafe.putIntVolatile
+    x = 23 // write barrier (?)
+    //sqRingPointer.setInt(params.sq_off.tail, curTail + 1) // should use unsafe.putIntVolatile for the correct barrier
+    sqRingPointerByteBuffer.putInt(params.sq_off.tail, curTail + 1)
+    x = 42 // write barrier (?)
+  }
 
   //val sqeIndex = 0
   /*val sqe = new IoUringSqe.ByReference(sqePointer.share(64 * sqeIndex)) // sqe = &sqring→sqes[index]
@@ -412,7 +429,7 @@ write_barrier();
       nextId += 1
       debug(s"Registering $id for op ${op.getClass}")
       outstandingEntries.put(id, completion)
-      submitGlobal(op.withUserData(id))
+      submitGlobalWithUserData(op, id)
     }
     //def handle(cqe: IoUringCqe): Unit = handle(cqe.user_data, cqe.res, cqe.flags)
     def handle(userData: Long, res: Int, flags: Int): Unit = if (userData != specialTag) {
