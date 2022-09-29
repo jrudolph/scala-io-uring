@@ -458,17 +458,15 @@ write_barrier();
           if (res == 0) handleRead(EmptyByteBuffer)
           else handleRead(resultBuffer(res, flags))
 
-          if (remainingBuffers < numBuffers / 2) { // FIXME
-            remainingBuffers = numBuffers
-            submitGlobal(ProvideBuffersOp(0, numBuffers, perBuffer, buffers, 0x1234, specialTag))
-          }
+          // give buffer back
+          submitGlobal(ProvideBuffersOp(0, 1, perBuffer, buffers + perBuffer * (flags >> IORING_CQE_BUFFER_SHIFT), 0x1234, specialTag))
         }
 
       override def write(fd: Int, offset: Long, buffer: ByteBuffer)(handleWrite: Int => Unit): Unit = {
         val len = buffer.remaining()
         TheWriteBufferByteBuffer.clear()
         TheWriteBufferByteBuffer.put(buffer)
-        submit(WriteOp(0, fd, offset, TheWriteBuffer, len, 0)) { (res, flags) =>
+        submit(WriteOp(0, fd, offset, TheWriteBuffer, len, 0)) { (res, _) =>
           require(res == len)
           handleWrite(res)
         }
