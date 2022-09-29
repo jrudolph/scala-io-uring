@@ -314,7 +314,7 @@ write_barrier();
   sqe.user_data = 0xdeadbeef
   sqe.write()*/
     val specialTag = -1L
-    val numBuffers = 1000
+    val numBuffers = 200
     val perBuffer = 4096
     val buffers = Native.malloc(numBuffers * perBuffer)
     val buffersPointer = new Pointer(buffers)
@@ -414,7 +414,6 @@ write_barrier();
     val uringIoContext = new IOContext {
       val outstandingEntries = new scala.collection.mutable.LongMap[(Int, Int) => Unit](1024)
       private var nextId = 1L
-      private var remainingBuffers = numBuffers
       val theBufferGroup = 0x1234: Short
       def resultBuffer(res: Int, flags: Int): ByteBuffer = {
         val bufId = flags >> IORING_CQE_BUFFER_SHIFT
@@ -453,13 +452,14 @@ write_barrier();
 
       override def read(fd: Int, offset: Long, length: Int)(handleRead: ByteBuffer => Unit): Unit =
         submit(ReadOp(IOSQE_BUFFER_SELECT, fd, offset, 0, length, 0, theBufferGroup)) { (res, flags) =>
-          if ((flags & IORING_CQE_F_BUFFER) != 0) remainingBuffers -= 1
-          require(res >= 0, s"Result was negative: ${res}")
-          if (res == 0) handleRead(EmptyByteBuffer)
-          else handleRead(resultBuffer(res, flags))
-
-          // give buffer back
-          submitGlobal(ProvideBuffersOp(0, 1, perBuffer, buffers + perBuffer * (flags >> IORING_CQE_BUFFER_SHIFT), 0x1234, specialTag))
+          if (res == -105 /*ENOBUFS */ ) read(fd, offset, length)(handleRead) // just retry
+          else {
+            if (res < 0) throw new RuntimeException(s"Result was negative: ${res}")
+            else if (res == 0) handleRead(EmptyByteBuffer)
+            else handleRead(resultBuffer(res, flags))
+            // give buffer back
+            submitGlobal(ProvideBuffersOp(0, 1, perBuffer, buffers + perBuffer * (flags >> IORING_CQE_BUFFER_SHIFT), 0x1234, specialTag))
+          }
         }
 
       override def write(fd: Int, offset: Long, buffer: ByteBuffer)(handleWrite: Int => Unit): Unit = {
