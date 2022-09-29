@@ -431,16 +431,23 @@ write_barrier();
         nextId += 1
         debug(s"Registering $id for op ${op.getClass}")
         outstandingEntries.put(id, completion)
-        submitGlobalWithUserData(op, id)
+        submitGlobalWithUserData(op, id | (op.opId.toLong << 32))
       }
       //def handle(cqe: IoUringCqe): Unit = handle(cqe.user_data, cqe.res, cqe.flags)
       def handle(userData: Long, res: Int, flags: Int): Unit = if (userData != specialTag) {
+        val id = userData & 0xffffffffL
+        val op = userData >> 32
         import scala.collection.JavaConverters._
-        if (!outstandingEntries.contains(userData)) println(s"Missing handler for userData: $userData existing: ${outstandingEntries.keys}")
+        if (!outstandingEntries.contains(id)) println(s"Missing handler for userData: $id existing: ${outstandingEntries.keys}")
         else {
-          val handler = outstandingEntries.remove(userData).get
-          debug(s"Looking for ${userData} found: $handler")
-          handler(res, flags)
+          val handler = outstandingEntries.remove(id).get
+          debug(s"Looking for ${id} found: $handler")
+          op match {
+            case IORING_OP_READ   => handler(res, flags)
+            case IORING_OP_WRITE  => handler(res, flags)
+            case IORING_OP_ACCEPT => handler(res, flags)
+            case IORING_OP_NOP    => handler(res, flags)
+          }
         }
       }
 
