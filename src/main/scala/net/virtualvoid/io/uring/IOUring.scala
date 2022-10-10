@@ -44,7 +44,7 @@ object IOUring {
     //println(s"length: $length")
     val sqRingPointer = libC.mmap(new Pointer(0), length, LibC.PROT_READ | LibC.PROT_WRITE, LibC.MAP_SHARED | LibC.MAP_POPULATE, uringFd, LibC.IORING_OFF_SQ_RING)
     val cqRingPointer = libC.mmap(new Pointer(0), params.cq_off.cqes + params.cq_entries * 16 /* sizeOf(IoUringCqe) */ , LibC.PROT_READ | LibC.PROT_WRITE, LibC.MAP_SHARED | LibC.MAP_POPULATE, uringFd, LibC.IORING_OFF_CQ_RING)
-    val sqePointer = libC.mmap(new Pointer(0), params.sq_entries * 64 /* sizeOf(IoUsingSqe) */ , LibC.PROT_READ | LibC.PROT_WRITE, LibC.MAP_SHARED | LibC.MAP_POPULATE, uringFd, LibC.IORING_OFF_SQES)
+    val sqePointer = libC.mmap(new Pointer(0), params.sq_entries * 64 /* sizeOf(IoUringSqe) */ , LibC.PROT_READ | LibC.PROT_WRITE, LibC.MAP_SHARED | LibC.MAP_POPULATE, uringFd, LibC.IORING_OFF_SQES)
     println(s"mmapped addr sqRingPointer: $sqRingPointer")
     println(s"mmapped addr sqePointer: $sqePointer")
     println(s"mmapped addr cqePointer: $cqRingPointer")
