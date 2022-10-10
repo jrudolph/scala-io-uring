@@ -1,9 +1,7 @@
 package net.virtualvoid.io.uring
 
 import com.sun.jna.{ Native, Pointer }
-import net.virtualvoid.io.uring.Utils.fdOf
 
-import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 
 trait IOUring {
@@ -128,11 +126,9 @@ object IOUring {
         outstandingEntries.put(id, completion)
         submitGlobalWithUserData(op, id | (op.opId.toLong << 32))
       }
-      //def handle(cqe: IoUringCqe): Unit = handle(cqe.user_data, cqe.res, cqe.flags)
       def handle(userData: Long, res: Int, flags: Int): Unit = if (userData != specialTag) {
         val id = userData & 0xffffffffL
         val op = userData >> 32
-        import scala.collection.JavaConverters._
         if (!outstandingEntries.contains(id)) println(s"Missing handler for userData: $id existing: ${outstandingEntries.keys}")
         else {
           val handler = outstandingEntries.remove(id).get
@@ -181,11 +177,8 @@ object IOUring {
       // on IO: add submission entry (and enter?)
       val toSubmit = sqTail() - sqHead()
       debug(s"sqHead: ${sqHead()} sqTail: ${sqTail()} toSubmit: $toSubmit")
-      //val res = LibC2.syscall(LibC.SYSCALL_IO_URING_ENTER, uringFd, toSubmit, 1, IORING_ENTER_GETEVENTS, 0)
       val res = libC.syscall(LibC.SYSCALL_IO_URING_ENTER, uringFd, toSubmit, 1, IORING_ENTER_GETEVENTS, 0)
-      //require(toSubmit == res)
-
-      //x += 1
+      // FIXME: should we check that: require(toSubmit == res)
 
       var cqIdx = cqHead()
       val last = cqTail()
