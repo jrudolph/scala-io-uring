@@ -7,8 +7,7 @@ import java.nio.ByteBuffer
 trait IOUring {
   def submitGlobal(op: Op): Unit
   def submitGlobalWithUserData(op: Op, userData: Long): Unit
-  def context: IOContext
-  def loop(): Unit
+  def loop(initialAction: IOContext => Unit): Unit
 }
 
 object IOUring {
@@ -171,31 +170,34 @@ object IOUring {
       }
     }
 
-    def loop(): Unit = while (true) {
-      // call uring enter to submit / collect completions
-      // run completions one by one
-      // on IO: add submission entry (and enter?)
-      val toSubmit = sqTail() - sqHead()
-      debug(s"sqHead: ${sqHead()} sqTail: ${sqTail()} toSubmit: $toSubmit")
-      val res = libC.syscall(LibC.SYSCALL_IO_URING_ENTER, uringFd, toSubmit, 1, IORING_ENTER_GETEVENTS, 0)
-      // FIXME: should we check that: require(toSubmit == res)
+    def loop(initialAction: IOContext => Unit): Unit = {
+      initialAction(context)
+      while (true) {
+        // call uring enter to submit / collect completions
+        // run completions one by one
+        // on IO: add submission entry (and enter?)
+        val toSubmit = sqTail() - sqHead()
+        debug(s"sqHead: ${sqHead()} sqTail: ${sqTail()} toSubmit: $toSubmit")
+        val res = libC.syscall(LibC.SYSCALL_IO_URING_ENTER, uringFd, toSubmit, 1, IORING_ENTER_GETEVENTS, 0)
+        // FIXME: should we check that: require(toSubmit == res)
 
-      var cqIdx = cqHead()
-      val last = cqTail()
+        var cqIdx = cqHead()
+        val last = cqTail()
 
-      debug(s"cqHead: $cqIdx cqTail: $last")
-      while (cqIdx < last) {
-        debug(s"At $cqIdx")
-        val idx = cqIdx & cqMask
-        //val cqeP = new IoUringCqe(cqRingPointer.share(params.cq_off.cqes))
-        //val cqes = cqeP.toArray(params.cq_entries).asInstanceOf[Array[IoUringCqe]]
-        //val cqe = new IoUringCqe(cqRingPointer.share(params.cq_off.cqes + idx * 16))
-        //debug(cqe.toString)
-        val off = params.cq_off.cqes + idx * 16
-        context.handle(cqRingPointerByteBuffer.getLong(off), cqRingPointerByteBuffer.getInt(off + 8), cqRingPointerByteBuffer.getInt(off + 12))
-        cqIdx += 1
+        debug(s"cqHead: $cqIdx cqTail: $last")
+        while (cqIdx < last) {
+          debug(s"At $cqIdx")
+          val idx = cqIdx & cqMask
+          //val cqeP = new IoUringCqe(cqRingPointer.share(params.cq_off.cqes))
+          //val cqes = cqeP.toArray(params.cq_entries).asInstanceOf[Array[IoUringCqe]]
+          //val cqe = new IoUringCqe(cqRingPointer.share(params.cq_off.cqes + idx * 16))
+          //debug(cqe.toString)
+          val off = params.cq_off.cqes + idx * 16
+          context.handle(cqRingPointerByteBuffer.getLong(off), cqRingPointerByteBuffer.getInt(off + 8), cqRingPointerByteBuffer.getInt(off + 12))
+          cqIdx += 1
+        }
+        cqRingPointerByteBuffer.putInt(params.cq_off.head, last)
       }
-      cqRingPointerByteBuffer.putInt(params.cq_off.head, last)
     }
   }
 }

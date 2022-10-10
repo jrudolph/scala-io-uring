@@ -45,10 +45,8 @@ object IOUringMain extends App {
         webserver(socketFd, ctx)
       }
 
-    override def run(): Unit = {
-      webserver(serverSocketFd, uring.context)
-      uring.loop()
-    }
+    override def run(): Unit =
+      uring.loop(webserver(serverSocketFd, _))
   }
   (1 to numThreads).map { i =>
     val t = new UringThread
