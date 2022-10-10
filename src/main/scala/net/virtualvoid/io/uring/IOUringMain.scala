@@ -107,6 +107,7 @@ return sring;
 
     val IOSQE_IO_DRAIN = 2: Byte
     val IOSQE_IO_LINK = 4: Byte
+    val IOSQE_ASYNC = 16: Byte
     val IOSQE_BUFFER_SELECT = 32: Byte
 
     val IORING_ENTER_GETEVENTS = 1
@@ -314,7 +315,7 @@ write_barrier();
   sqe.user_data = 0xdeadbeef
   sqe.write()*/
     val specialTag = -1L
-    val numBuffers = 200
+    val numBuffers = 500
     val perBuffer = 4096
     val buffers = Native.malloc(numBuffers * perBuffer)
     val buffersPointer = new Pointer(buffers)
@@ -455,10 +456,10 @@ write_barrier();
         submit(NopOp(0, 0))((_, _) => f)
 
       override def accept(fd: Int)(handleSocket: Int => Unit): Unit =
-        submit(AcceptOp(0, sfd, 0, 0, 0))((res, _) => handleSocket(res))
+        submit(AcceptOp(IOSQE_ASYNC, sfd, 0, 0, 0))((res, _) => handleSocket(res))
 
       override def read(fd: Int, offset: Long, length: Int)(handleRead: ByteBuffer => Unit): Unit =
-        submit(ReadOp(IOSQE_BUFFER_SELECT, fd, offset, 0, length, 0, theBufferGroup)) { (res, flags) =>
+        submit(ReadOp((IOSQE_BUFFER_SELECT | IOSQE_ASYNC).toByte, fd, offset, 0, length, 0, theBufferGroup)) { (res, flags) =>
           if (res == -105 /*ENOBUFS */ ) read(fd, offset, length)(handleRead) // just retry
           else {
             if (res < 0) throw new RuntimeException(s"Result was negative: ${res}")
@@ -473,7 +474,7 @@ write_barrier();
         val len = buffer.remaining()
         TheWriteBufferByteBuffer.clear()
         TheWriteBufferByteBuffer.put(buffer)
-        submit(WriteOp(0, fd, offset, TheWriteBuffer, len, 0)) { (res, _) =>
+        submit(WriteOp(IOSQE_ASYNC, fd, offset, TheWriteBuffer, len, 0)) { (res, _) =>
           require(res == len)
           handleWrite(res)
         }
